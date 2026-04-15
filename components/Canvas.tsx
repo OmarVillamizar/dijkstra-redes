@@ -11,7 +11,7 @@ import {
 import { Node, Edge, Tool } from '@/lib/types';
 import WeightModal from './WeightModal';
 
-/* ─── helpers ───────────────────────────────────────────────── */
+/* ─── Constants ─────────────────────────────────────────────── */
 const NODE_R = 28;
 const GRID_SIZE = 40;
 
@@ -19,202 +19,231 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function svgPoint(
-  svgEl: SVGSVGElement,
-  clientX: number,
-  clientY: number
-): { x: number; y: number } {
+function svgPoint(svgEl: SVGSVGElement, clientX: number, clientY: number) {
   const pt = svgEl.createSVGPoint();
   pt.x = clientX;
   pt.y = clientY;
-  const transformed = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
-  return { x: transformed.x, y: transformed.y };
+  return pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
 }
 
 function snapToGrid(v: number) {
   return Math.round(v / GRID_SIZE) * GRID_SIZE;
 }
 
-/* ─── types ─────────────────────────────────────────────────── */
+/* ─── Interfaces ────────────────────────────────────────────── */
 interface PendingEdge {
   sourceId: string;
   mouseX: number;
   mouseY: number;
 }
-
 interface WeightModalState {
   sourceId: string;
   targetId: string;
 }
-
 export interface CanvasRef {
-  resetView: () => void;
-  zoomIn: () => void;
-  zoomOut: () => void;
+  resetView(): void;
+  zoomIn(): void;
+  zoomOut(): void;
 }
-
 interface Props {
   nodes: Node[];
   edges: Edge[];
   activeTool: Tool;
-  optimalPath: string[];   // node labels of the optimal route
-  onAddNode: (node: Node) => void;
-  onAddEdge: (edge: Edge) => void;
-  onDeleteNode: (nodeId: string) => void;
-  onDeleteEdge: (edgeId: string) => void;
+  optimalPath: string[];
+  onAddNode(node: Node): void;
+  onAddEdge(edge: Edge): void;
+  onDeleteNode(nodeId: string): void;
+  onDeleteEdge(edgeId: string): void;
+  onMoveNode(nodeId: string, x: number, y: number): void;
 }
 
-/* ─── Grid pattern ──────────────────────────────────────────── */
+/* ─── Grid ──────────────────────────────────────────────────── */
 function GridPattern() {
   return (
     <defs>
-      <pattern id="grid" width={GRID_SIZE} height={GRID_SIZE} patternUnits="userSpaceOnUse">
+      <pattern id="canvas-grid" width={GRID_SIZE} height={GRID_SIZE} patternUnits="userSpaceOnUse">
         <path
           d={`M ${GRID_SIZE} 0 L 0 0 0 ${GRID_SIZE}`}
           fill="none"
-          stroke="rgba(88,166,255,0.06)"
+          stroke="rgba(0,0,0,0.06)"
           strokeWidth="0.5"
         />
       </pattern>
+      <filter id="shadow-node" x="-30%" y="-30%" width="160%" height="160%">
+        <feDropShadow dx="0" dy="2" stdDeviation="3" floodColor="rgba(0,0,0,0.12)"/>
+      </filter>
     </defs>
   );
 }
 
-/* ─── Component ─────────────────────────────────────────────── */
+/* ─── Canvas Component ──────────────────────────────────────── */
 const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
-  {
-    nodes,
-    edges,
-    activeTool,
-    optimalPath,
-    onAddNode,
-    onAddEdge,
-    onDeleteNode,
-    onDeleteEdge,
-  },
+  { nodes, edges, activeTool, optimalPath, onAddNode, onAddEdge, onDeleteNode, onDeleteEdge, onMoveNode },
   ref
 ) {
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // Viewport state (pan + zoom)
+  /* Viewport */
   const [viewBox, setViewBox] = useState({ x: -400, y: -300, w: 1200, h: 800 });
+
+  /* Pan state */
   const isPanning = useRef(false);
-  const panStart = useRef({ x: 0, y: 0, vx: 0, vy: 0 });
+  const panStart  = useRef({ clientX: 0, clientY: 0, vx: 0, vy: 0 });
 
-  // Edge creation
-  const [pendingEdge, setPendingEdge] = useState<PendingEdge | null>(null);
-  const [weightModal, setWeightModal] = useState<WeightModalState | null>(null);
+  /* Node drag state (move tool) */
+  const draggingNodeId  = useRef<string | null>(null);
+  const dragOffset      = useRef({ dx: 0, dy: 0 });
+  const [isDragging, setIsDragging] = useState(false);
 
-  // Hover tracking for delete tool
+  /* Edge creation */
+  const [pendingEdge,  setPendingEdge]  = useState<PendingEdge | null>(null);
+  const [weightModal,  setWeightModal]  = useState<WeightModalState | null>(null);
+
+  /* Hover for delete */
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
 
-  /* ── Imperative zoom/reset ──────────────────────────────── */
+  /* ── Imperative API ───────────────────────────────────────── */
   useImperativeHandle(ref, () => ({
-    resetView() {
-      setViewBox({ x: -400, y: -300, w: 1200, h: 800 });
-    },
-    zoomIn() {
-      setViewBox((v) => {
-        const factor = 0.8;
-        const cx = v.x + v.w / 2;
-        const cy = v.y + v.h / 2;
-        const nw = v.w * factor;
-        const nh = v.h * factor;
-        return { x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh };
-      });
-    },
-    zoomOut() {
-      setViewBox((v) => {
-        const factor = 1.25;
-        const cx = v.x + v.w / 2;
-        const cy = v.y + v.h / 2;
-        const nw = v.w * factor;
-        const nh = v.h * factor;
-        return { x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh };
-      });
-    },
+    resetView() { setViewBox({ x: -400, y: -300, w: 1200, h: 800 }); },
+    zoomIn()  { applyZoom(0.8); },
+    zoomOut() { applyZoom(1.25); },
   }));
 
-  /* ── Keyboard shortcuts ─────────────────────────────────── */
-  // Keyboard handling is done in page.tsx via activeTool prop
+  function applyZoom(factor: number) {
+    setViewBox((v) => {
+      const cx = v.x + v.w / 2;
+      const cy = v.y + v.h / 2;
+      const nw = Math.min(Math.max(v.w * factor, 300), 8000);
+      const nh = Math.min(Math.max(v.h * factor, 200), 6000);
+      return { x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh };
+    });
+  }
 
-  /* ── Wheel zoom ─────────────────────────────────────────── */
+  /* ── Wheel zoom ───────────────────────────────────────────── */
   const handleWheel = useCallback((e: React.WheelEvent<SVGSVGElement>) => {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 1.12 : 0.88;
+    const factor = e.deltaY > 0 ? 1.1 : 0.9;
     const svg = svgRef.current!;
-    const pt = svgPoint(svg, e.clientX, e.clientY);
+    const pt  = svgPoint(svg, e.clientX, e.clientY);
     setViewBox((v) => {
       const nw = Math.min(Math.max(v.w * factor, 300), 8000);
       const nh = Math.min(Math.max(v.h * factor, 200), 6000);
-      const nx = pt.x - (pt.x - v.x) * (nw / v.w);
-      const ny = pt.y - (pt.y - v.y) * (nh / v.h);
-      return { x: nx, y: ny, w: nw, h: nh };
+      return {
+        x: pt.x - (pt.x - v.x) * (nw / v.w),
+        y: pt.y - (pt.y - v.y) * (nh / v.h),
+        w: nw, h: nh,
+      };
     });
   }, []);
 
-  /* ── Pan ────────────────────────────────────────────────── */
-  const startPan = useCallback(
-    (clientX: number, clientY: number) => {
-      isPanning.current = true;
-      panStart.current = {
-        x: clientX,
-        y: clientY,
-        vx: viewBox.x,
-        vy: viewBox.y,
-      };
+  /* ── Mouse DOWN ───────────────────────────────────────────── */
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent<SVGSVGElement>) => {
+      // Middle mouse always pans
+      if (e.button === 1) {
+        e.preventDefault();
+        isPanning.current = true;
+        panStart.current = { clientX: e.clientX, clientY: e.clientY, vx: viewBox.x, vy: viewBox.y };
+        return;
+      }
+      if (e.button !== 0) return;
+
+      if (activeTool === 'move') {
+        // Check if clicking on a node
+        const target = e.target as SVGElement;
+        const nodeGroup = target.closest<SVGElement>('[data-node-id]');
+        if (nodeGroup) {
+          const nodeId = nodeGroup.dataset.nodeId!;
+          const node   = nodes.find((n) => n.id === nodeId);
+          if (!node) return;
+          const svg = svgRef.current!;
+          const pt  = svgPoint(svg, e.clientX, e.clientY);
+          draggingNodeId.current = nodeId;
+          dragOffset.current     = { dx: pt.x - node.x, dy: pt.y - node.y };
+          setIsDragging(true);
+          e.stopPropagation();
+        } else {
+          // Pan canvas
+          isPanning.current = true;
+          panStart.current  = { clientX: e.clientX, clientY: e.clientY, vx: viewBox.x, vy: viewBox.y };
+        }
+      }
     },
-    [viewBox.x, viewBox.y]
+    [activeTool, nodes, viewBox.x, viewBox.y]
   );
 
-  const doPan = useCallback(
-    (clientX: number, clientY: number) => {
-      if (!isPanning.current) return;
+  /* ── Mouse MOVE ───────────────────────────────────────────── */
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<SVGSVGElement>) => {
       const svg = svgRef.current!;
-      const scale = viewBox.w / svg.clientWidth;
-      const dx = (clientX - panStart.current.x) * scale;
-      const dy = (clientY - panStart.current.y) * scale;
-      setViewBox((v) => ({
-        ...v,
-        x: panStart.current.vx - dx,
-        y: panStart.current.vy - dy,
-      }));
+
+      // Node drag
+      if (draggingNodeId.current) {
+        const pt = svgPoint(svg, e.clientX, e.clientY);
+        onMoveNode(
+          draggingNodeId.current,
+          pt.x - dragOffset.current.dx,
+          pt.y - dragOffset.current.dy
+        );
+        return;
+      }
+
+      // Canvas pan
+      if (isPanning.current) {
+        const scale = viewBox.w / svg.clientWidth;
+        const dx    = (e.clientX - panStart.current.clientX) * scale;
+        const dy    = (e.clientY - panStart.current.clientY) * scale;
+        setViewBox((v) => ({ ...v, x: panStart.current.vx - dx, y: panStart.current.vy - dy }));
+        return;
+      }
+
+      // Pending edge preview
+      if (pendingEdge && activeTool === 'edge') {
+        const pt = svgPoint(svg, e.clientX, e.clientY);
+        setPendingEdge((prev) => prev ? { ...prev, mouseX: pt.x, mouseY: pt.y } : null);
+      }
     },
-    [viewBox.w]
+    [activeTool, pendingEdge, viewBox.w, onMoveNode]
   );
 
-  const endPan = useCallback(() => {
+  /* ── Mouse UP ─────────────────────────────────────────────── */
+  const handleMouseUp = useCallback(() => {
+    if (draggingNodeId.current) {
+      draggingNodeId.current = null;
+      setIsDragging(false);
+    }
     isPanning.current = false;
   }, []);
 
-  /* ── Canvas click ───────────────────────────────────────── */
+  /* ── Canvas CLICK (add node) ──────────────────────────────── */
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
       if (activeTool !== 'node') return;
-      if ((e.target as SVGElement).closest('.node-group, .edge-group')) return;
+      if ((e.target as SVGElement).closest('[data-node-id], [data-edge-id]')) return;
 
       const svg = svgRef.current!;
-      const pt = svgPoint(svg, e.clientX, e.clientY);
-      const x = snapToGrid(pt.x);
-      const y = snapToGrid(pt.y);
+      const pt  = svgPoint(svg, e.clientX, e.clientY);
+      const x   = snapToGrid(pt.x);
+      const y   = snapToGrid(pt.y);
 
-      // Avoid overlapping
-      const tooClose = nodes.some(
-        (n) => Math.hypot(n.x - x, n.y - y) < NODE_R * 2.2
-      );
+      const tooClose = nodes.some((n) => Math.hypot(n.x - x, n.y - y) < NODE_R * 2.2);
       if (tooClose) return;
 
-      const label = String.fromCharCode(65 + nodes.length % 26);
-      const suffix = nodes.length >= 26 ? String(Math.floor(nodes.length / 26)) : '';
-      onAddNode({ id: uid(), label: label + suffix, x, y });
+      // Next label: A, B, C... then A1, B1...
+      const idx    = nodes.length;
+      const letter = String.fromCharCode(65 + (idx % 26));
+      const suffix = idx >= 26 ? String(Math.floor(idx / 26)) : '';
+      onAddNode({ id: uid(), label: letter + suffix, x, y });
     },
     [activeTool, nodes, onAddNode]
   );
 
-  /* ── Node click ─────────────────────────────────────────── */
+  /* ── Node CLICK ───────────────────────────────────────────── */
   const handleNodeClick = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
       e.stopPropagation();
+      if (isDragging) return;  // suppress click after drag
 
       if (activeTool === 'delete') {
         onDeleteNode(nodeId);
@@ -224,126 +253,71 @@ const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
       if (activeTool === 'edge') {
         if (!pendingEdge) {
           const svg = svgRef.current!;
-          const pt = svgPoint(svg, e.clientX, e.clientY);
+          const pt  = svgPoint(svg, e.clientX, e.clientY);
           setPendingEdge({ sourceId: nodeId, mouseX: pt.x, mouseY: pt.y });
         } else {
-          if (pendingEdge.sourceId === nodeId) {
-            // Same node  — cancel
-            setPendingEdge(null);
-            return;
-          }
-          // Check duplicate edge
+          if (pendingEdge.sourceId === nodeId) { setPendingEdge(null); return; }
           const duplicate = edges.some(
             (ed) =>
               (ed.sourceId === pendingEdge.sourceId && ed.targetId === nodeId) ||
               (ed.sourceId === nodeId && ed.targetId === pendingEdge.sourceId)
           );
-          if (duplicate) {
-            setPendingEdge(null);
-            return;
-          }
+          if (duplicate) { setPendingEdge(null); return; }
           setWeightModal({ sourceId: pendingEdge.sourceId, targetId: nodeId });
           setPendingEdge(null);
         }
       }
     },
-    [activeTool, edges, onDeleteNode, pendingEdge]
+    [activeTool, edges, isDragging, onDeleteNode, pendingEdge]
   );
 
-  /* ── Edge click ─────────────────────────────────────────── */
+  /* ── Edge CLICK ───────────────────────────────────────────── */
   const handleEdgeClick = useCallback(
     (e: React.MouseEvent, edgeId: string) => {
       e.stopPropagation();
-      if (activeTool === 'delete') {
-        onDeleteEdge(edgeId);
-      }
+      if (activeTool === 'delete') onDeleteEdge(edgeId);
     },
     [activeTool, onDeleteEdge]
   );
 
-  /* ── Mouse move (pending edge + pan) ───────────────────── */
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent<SVGSVGElement>) => {
-      doPan(e.clientX, e.clientY);
-
-      if (pendingEdge && activeTool === 'edge') {
-        const svg = svgRef.current!;
-        const pt = svgPoint(svg, e.clientX, e.clientY);
-        setPendingEdge((prev) =>
-          prev ? { ...prev, mouseX: pt.x, mouseY: pt.y } : null
-        );
-      }
-    },
-    [doPan, pendingEdge, activeTool]
-  );
-
-  /* ── Mouse down ─────────────────────────────────────────── */
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent<SVGSVGElement>) => {
-      if (activeTool === 'pan' || (e.button === 1)) {
-        startPan(e.clientX, e.clientY);
-      }
-      // Middle mouse always pans
-      if (e.button === 1) e.preventDefault();
-    },
-    [activeTool, startPan]
-  );
-
-  /* ── Mouse up ───────────────────────────────────────────── */
-  const handleMouseUp = useCallback(() => {
-    endPan();
-  }, [endPan]);
-
-  /* ── Cancel pending edge on Escape ─────────────────────── */
+  /* ── Escape cancels pending edge ──────────────────────────── */
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPendingEdge(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    const fn = (e: KeyboardEvent) => { if (e.key === 'Escape') setPendingEdge(null); };
+    window.addEventListener('keydown', fn);
+    return () => window.removeEventListener('keydown', fn);
   }, []);
 
-  /* ── Weight modal confirm ───────────────────────────────── */
+  /* ── Weight modal confirm ─────────────────────────────────── */
   const handleWeightConfirm = useCallback(
     (weight: number) => {
       if (!weightModal) return;
-      onAddEdge({
-        id: uid(),
-        sourceId: weightModal.sourceId,
-        targetId: weightModal.targetId,
-        weight,
-      });
+      onAddEdge({ id: uid(), sourceId: weightModal.sourceId, targetId: weightModal.targetId, weight });
       setWeightModal(null);
     },
     [weightModal, onAddEdge]
   );
 
-  /* ── Optimal path edge set ──────────────────────────────── */
+  /* ── Optimal edge set ─────────────────────────────────────── */
   const optimalEdgeIds = new Set<string>();
   if (optimalPath.length > 1) {
     for (let i = 0; i < optimalPath.length - 1; i++) {
-      const aLabel = optimalPath[i];
-      const bLabel = optimalPath[i + 1];
+      const aL = optimalPath[i], bL = optimalPath[i + 1];
       const edge = edges.find((ed) => {
-        const src = nodes.find((n) => n.id === ed.sourceId);
-        const tgt = nodes.find((n) => n.id === ed.targetId);
-        return (
-          (src?.label === aLabel && tgt?.label === bLabel) ||
-          (src?.label === bLabel && tgt?.label === aLabel)
-        );
+        const s = nodes.find((n) => n.id === ed.sourceId);
+        const t = nodes.find((n) => n.id === ed.targetId);
+        return (s?.label === aL && t?.label === bL) || (s?.label === bL && t?.label === aL);
       });
       if (edge) optimalEdgeIds.add(edge.id);
     }
   }
 
-  /* ── Cursor class ───────────────────────────────────────── */
+  /* ── Cursor class ─────────────────────────────────────────── */
   const cursorClass = [
     'canvas-svg',
     `tool-${activeTool}`,
     isPanning.current ? 'panning' : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
+    isDragging ? 'dragging' : '',
+  ].filter(Boolean).join(' ');
 
   const vbStr = `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`;
 
@@ -364,16 +338,14 @@ const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
       >
         <GridPattern />
 
-        {/* Background fill with grid */}
+        {/* Canvas background */}
         <rect
-          x={viewBox.x - 10000}
-          y={viewBox.y - 10000}
-          width={viewBox.w + 20000}
-          height={viewBox.h + 20000}
-          fill="url(#grid)"
+          x={viewBox.x - 10000} y={viewBox.y - 10000}
+          width={viewBox.w + 20000} height={viewBox.h + 20000}
+          fill="url(#canvas-grid)"
         />
 
-        {/* ── Edges ─────────────────────────────────────────── */}
+        {/* ── Edges ───────────────────────────────────────────── */}
         <g>
           {edges.map((edge) => {
             const src = nodes.find((n) => n.id === edge.sourceId);
@@ -382,60 +354,46 @@ const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
 
             const mx = (src.x + tgt.x) / 2;
             const my = (src.y + tgt.y) / 2;
-            const isOptimal = optimalEdgeIds.has(edge.id);
-            const isHovered = hoveredEdgeId === edge.id;
+            const isOptimal  = optimalEdgeIds.has(edge.id);
+            const isHovDel   = hoveredEdgeId === edge.id && activeTool === 'delete';
 
             return (
               <g
                 key={edge.id}
+                data-edge-id={edge.id}
                 className="edge-group"
                 onClick={(e) => handleEdgeClick(e, edge.id)}
                 onMouseEnter={() => activeTool === 'delete' && setHoveredEdgeId(edge.id)}
                 onMouseLeave={() => setHoveredEdgeId(null)}
                 style={{ cursor: activeTool === 'delete' ? 'not-allowed' : 'default' }}
               >
-                {/* Hitbox (wider invisible line) */}
+                {/* Wide hitbox */}
+                <line x1={src.x} y1={src.y} x2={tgt.x} y2={tgt.y} stroke="transparent" strokeWidth={18}/>
+
+                {/* Visible edge line */}
                 <line
-                  x1={src.x} y1={src.y}
-                  x2={tgt.x} y2={tgt.y}
-                  stroke="transparent"
-                  strokeWidth="16"
-                />
-                {/* Visible edge */}
-                <line
-                  className={`edge-line ${isOptimal ? 'edge-optimal' : ''}`}
-                  x1={src.x} y1={src.y}
-                  x2={tgt.x} y2={tgt.y}
-                  stroke={
-                    isHovered && activeTool === 'delete'
-                      ? 'var(--accent-red)'
-                      : isOptimal
-                      ? 'var(--accent-gold)'
-                      : 'var(--edge-stroke)'
-                  }
-                  strokeWidth={isOptimal ? 2.5 : 2}
+                  className={`edge-line ${isOptimal ? 'edge-optimal' : ''} ${isHovDel ? 'edge-delete-hover' : ''}`}
+                  x1={src.x} y1={src.y} x2={tgt.x} y2={tgt.y}
+                  stroke={isHovDel ? 'var(--red)' : isOptimal ? 'var(--optimal)' : 'var(--edge-stroke)'}
+                  strokeWidth={isOptimal ? 3 : 2.5}
                   strokeLinecap="round"
-                  filter={isHovered && activeTool === 'delete' ? 'url(#glow-red)' : undefined}
                 />
+
                 {/* Weight label */}
                 <rect
-                  x={mx - 16}
-                  y={my - 11}
-                  width={32}
-                  height={22}
-                  rx={5}
-                  fill={isOptimal ? 'rgba(240,192,64,0.15)' : 'var(--bg-canvas)'}
-                  stroke={isOptimal ? 'rgba(240,192,64,0.4)' : 'var(--border)'}
-                  strokeWidth={1}
+                  x={mx - 17} y={my - 12} width={34} height={24} rx={6}
+                  fill={isOptimal ? 'var(--optimal-light)' : 'var(--edge-weight-bg)'}
+                  stroke={isOptimal ? 'var(--optimal-border)' : 'var(--border)'}
+                  strokeWidth={1.5}
+                  style={{ filter: 'drop-shadow(0 1px 3px rgba(0,0,0,0.1))' }}
                 />
                 <text
-                  x={mx}
-                  y={my + 5}
+                  x={mx} y={my + 5}
                   textAnchor="middle"
-                  fill={isOptimal ? 'var(--accent-gold)' : 'var(--text-secondary)'}
-                  fontSize={12}
+                  fill={isOptimal ? 'var(--optimal)' : 'var(--orange)'}
+                  fontSize={13}
                   fontFamily="JetBrains Mono, monospace"
-                  fontWeight="600"
+                  fontWeight="700"
                   style={{ pointerEvents: 'none', userSelect: 'none' }}
                 >
                   {edge.weight}
@@ -452,11 +410,10 @@ const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
           return (
             <line
               x1={src.x} y1={src.y}
-              x2={pendingEdge.mouseX}
-              y2={pendingEdge.mouseY}
-              stroke="var(--accent-purple)"
+              x2={pendingEdge.mouseX} y2={pendingEdge.mouseY}
+              stroke="var(--orange)"
               strokeWidth={2}
-              strokeDasharray="6 4"
+              strokeDasharray="7 4"
               strokeLinecap="round"
               style={{ pointerEvents: 'none' }}
             />
@@ -466,24 +423,55 @@ const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
         {/* ── Nodes ─────────────────────────────────────────── */}
         <g>
           {nodes.map((node) => {
-            const isInOptimal = optimalPath.includes(node.label);
-            const isPending = pendingEdge?.sourceId === node.id;
+            const isInOptimal  = optimalPath.includes(node.label);
+            const isPendFirst  = pendingEdge?.sourceId === node.id;
+            const isHovDel     = hoveredNodeId === node.id && activeTool === 'delete';
+            const isDraggingMe = draggingNodeId.current === node.id;
+
+            const strokeColor = isHovDel
+              ? 'var(--red)'
+              : isInOptimal
+              ? 'var(--optimal)'
+              : isPendFirst
+              ? 'var(--orange)'
+              : 'var(--node-stroke)';
+
+            const fillColor = isHovDel
+              ? 'var(--red-light)'
+              : isInOptimal
+              ? 'var(--optimal-light)'
+              : 'var(--node-fill)';
 
             return (
               <g
                 key={node.id}
+                data-node-id={node.id}
                 className="node-group"
                 onClick={(e) => handleNodeClick(e, node.id)}
-                style={{ cursor: activeTool === 'delete' ? 'not-allowed' : activeTool === 'edge' ? 'pointer' : 'default' }}
-                role="button"
-                aria-label={`Nodo ${node.label}`}
+                onMouseEnter={() => activeTool === 'delete' && setHoveredNodeId(node.id)}
+                onMouseLeave={() => setHoveredNodeId(null)}
+                style={{
+                  cursor: activeTool === 'delete'
+                    ? 'not-allowed'
+                    : activeTool === 'move'
+                    ? isDraggingMe ? 'grabbing' : 'grab'
+                    : activeTool === 'edge'
+                    ? 'pointer'
+                    : 'default',
+                }}
               >
-                {/* Glow ring */}
-                {(isInOptimal || isPending) && (
+                {/* Shadow / glow ring */}
+                {(isInOptimal || isPendFirst || isDraggingMe) && (
                   <circle
                     cx={node.x} cy={node.y}
-                    r={NODE_R + 8}
-                    fill={isInOptimal ? 'var(--accent-gold-dim)' : 'rgba(188,140,255,0.15)'}
+                    r={NODE_R + 9}
+                    fill={
+                      isInOptimal
+                        ? 'rgba(34,197,94,0.12)'
+                        : isPendFirst || isDraggingMe
+                        ? 'rgba(234,88,12,0.1)'
+                        : 'transparent'
+                    }
                     style={{ pointerEvents: 'none' }}
                   />
                 )}
@@ -491,29 +479,18 @@ const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
                 {/* Main circle */}
                 <circle
                   cx={node.x} cy={node.y} r={NODE_R}
-                  fill="var(--node-fill)"
-                  stroke={
-                    isPending
-                      ? 'var(--accent-purple)'
-                      : isInOptimal
-                      ? 'var(--accent-gold)'
-                      : 'var(--node-stroke)'
-                  }
-                  strokeWidth={isInOptimal ? 2.5 : 2}
-                  className={`node-circle ${isInOptimal ? 'node-optimal' : ''} ${isPending ? 'node-pending' : ''}`}
+                  fill={fillColor}
+                  stroke={strokeColor}
+                  strokeWidth={isInOptimal || isHovDel ? 3 : 2.5}
+                  className={`node-circle ${isInOptimal ? 'node-optimal' : ''} ${isPendFirst ? 'node-pending-first' : ''} ${isHovDel ? 'node-delete-hover' : ''}`}
+                  filter="url(#shadow-node)"
                 />
 
                 {/* Label */}
                 <text
                   x={node.x} y={node.y + 6}
                   textAnchor="middle"
-                  fill={
-                    isInOptimal
-                      ? 'var(--accent-gold)'
-                      : isPending
-                      ? 'var(--accent-purple)'
-                      : 'var(--text-primary)'
-                  }
+                  fill={isHovDel ? 'var(--red)' : isInOptimal ? 'var(--optimal)' : isPendFirst ? 'var(--orange)' : 'var(--node-text)'}
                   fontSize={16}
                   fontFamily="Inter, sans-serif"
                   fontWeight="700"
@@ -525,17 +502,6 @@ const Canvas = forwardRef<CanvasRef, Props>(function Canvas(
             );
           })}
         </g>
-
-        {/* defs for glow effects */}
-        <defs>
-          <filter id="glow-red" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
-            <feMerge>
-              <feMergeNode in="blur"/>
-              <feMergeNode in="SourceGraphic"/>
-            </feMerge>
-          </filter>
-        </defs>
       </svg>
 
       {/* Weight modal */}

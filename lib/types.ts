@@ -12,7 +12,7 @@ export interface Edge {
   weight: number;
 }
 
-export type Tool = 'node' | 'edge' | 'delete' | 'pan';
+export type Tool = 'node' | 'edge' | 'delete' | 'move';
 
 export interface RouteResult {
   path: string[];    // labels: ['A', 'B', 'E']
