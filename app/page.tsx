@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Node, Edge, Tool, RouteResult } from '@/lib/types';
 import { findAllRoutes } from '@/lib/allRoutes';
@@ -104,19 +105,9 @@ export default function Home() {
 
         {/* logos container */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          {/* UFPS Logo SVG representation */}
+          {/* UFPS Logo Image */}
           <div className="ufps-logo-wrap" title="UFPS - Universidad Francisco de Paula Santander">
-            <svg width="42" height="42" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="100" height="100" fill="#dc2626"/>
-              {/* U */}
-              <path d="M20 20v30h20V20M20 50h20" stroke="white" strokeWidth="6" fill="none"/>
-              {/* F */}
-              <path d="M55 20v30M55 20h20M55 35h15" stroke="white" strokeWidth="6" fill="none"/>
-              {/* P */}
-              <path d="M20 65v25M20 65h15c2.76 0 5 2.24 5 5s-2.24 5-5 5H20" stroke="white" strokeWidth="6" fill="none"/>
-              {/* S */}
-              <path d="M75 65H55v7.5h20V80H55v10h20" stroke="white" strokeWidth="6" fill="none"/>
-            </svg>
+            <Image src="/ufps-logo.png" alt="Logo UFPS" width={42} height={42} style={{ objectFit: 'contain' }} />
           </div>
 
           <div className="header-divider" style={{ margin: '0 4px' }} />
